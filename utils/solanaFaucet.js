@@ -1,5 +1,6 @@
 // utils/solanaFaucet.js
 const solanaWeb3 = require('@solana/web3.js');
+const bs58 = require('bs58');
 
 // Monto fijo a enviar (ej. 0.01 SOL)
 const AMOUNT_TO_SEND_LAMPORTS = 0.01 * solanaWeb3.LAMPORTS_PER_SOL;
@@ -14,8 +15,10 @@ async function sendSolanaToken(claim) {
 
     // 2. Cargar nuestra billetera de faucet
     // (Asume que la clave está guardada como un string JSON "[1,2,3...]")
-    const secretKey = Uint8Array.from(JSON.parse(PRIVATE_KEY_STRING));
+    const secretKey = bs58.decode(PRIVATE_KEY_STRING);
     const faucetKeypair = solanaWeb3.Keypair.fromSecretKey(secretKey);
+
+    console.log(`[SOL] Dirección PÚBLICA del Faucet: ${faucetKeypair.publicKey.toBase58()}`);
 
     // 3. Destino
     const destPubkey = new solanaWeb3.PublicKey(claim.wallet_address);
