@@ -1,49 +1,61 @@
-// 1. Cargar variables de entorno
+// Cargar variables de entorno
 require('dotenv').config();
 
-// 2. Importar dependencias
+// Importar dependencias
 const express = require('express');
-const db = require('./db'); // Nuestro pool de base de datos
-const { validateToken } = require('./utils/tokenService'); // Nuestro validador
+const db = require('./db');
+const { validateToken } = require('./utils/tokenService');
 const { createHash } = require('./utils/hash');
+const { verifyCaptcha } = require('./utils/captchaService');
+const { claimLimiter, generalLimiter } = require('./middleware/rateLimit');
 
-// 3. Inicializar la app
+// Inicializar la app
 const app = express();
 app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 
-// 4. Middlewares
-app.use(express.json()); // <-- ¡MUY IMPORTANTE! Para leer JSON del body
+// Middlewares
+app.use(express.json());
 
 // =======================================================
-// TAREA 3: Endpoint 1 - /c/:token (Preflight)
+// Endpoint 1 - /c/:token (Preflight)
 // =======================================================
-app.get('/c/:token', async (req, res) => {
+app.get('/c/:token', generalLimiter, async (req, res) => {
   try {
     const { token } = req.params;
 
-    // Paso 1: Validar el HMAC del token (Tarea 2)
+    // Paso 1: Validar el HMAC del token
     const { isValid, payload } = validateToken(token);
+
     if (!isValid) {
       return res.status(400).json({ valid: false, error: 'Token inválido o malformado.' });
     }
 
     // Paso 2: El token es legítimo, ¿pero sigue activo en nuestra BD?
     const { rows } = await db.query(
-      'SELECT is_active FROM qr_codes WHERE token = $1',
+      'SELECT is_active, expires_at FROM qr_codes WHERE token = $1',
       [payload]
     );
 
     if (rows.length === 0) {
-      // Nota: ¡Esto significa que generaste un token pero NUNCA lo guardaste en la BD!
       return res.status(404).json({ valid: false, error: 'Token no encontrado.' });
     }
 
-    if (!rows[0].is_active) {
+    const qrCode = rows[0];
+
+    // 1. Chequeo de estado
+    if (!qrCode.is_active) {
       return res.status(410).json({ valid: false, error: 'Este token ya fue reclamado.' });
     }
 
-    // ¡Éxito! El token es válido y está activo.
+    // 2. Chequeo de expiración
+    const now = new Date();
+    const expiresAt = new Date(qrCode.expires_at);
+    if (now > expiresAt) {
+        return res.status(410).json({ valid: false, error: 'Este código ha expirado.' });
+    }
+
+    // El token es válido y está activo.
     res.json({ valid: true });
 
   } catch (err) {
@@ -53,19 +65,23 @@ app.get('/c/:token', async (req, res) => {
 });
 
 // =======================================================
-// TAREA 3: Endpoint 2 - /api/claim 
+// Endpoint 2 - /api/claim 
 // =======================================================
-app.post('/api/claim', async (req, res) => {
-  // TODO: Implementar CAPTCHA y Rate Limits aquí
+app.post('/api/claim', claimLimiter, async (req, res) => {
+  const { token, walletAddress, blockchain, captchaToken } = req.body;
 
-  const { token, walletAddress, blockchain } = req.body;
+  // Obtener y hashear IP/Device
+  const ip = req.ip;
+  const isHuman = await verifyCaptcha(captchaToken, ip);
+  
+  if (!isHuman) {
+    // Si falla el captcha, rechazamos antes de tocar la base de datos
+    return res.status(400).json({ success: false, error: 'Falló la verificación de CAPTCHA (o eres un robot).' });
+  }
 
-  // --- TAREA 5: Obtener y hashear IP/Device ---
-  const ip = req.ip; // Gracias a 'trust proxy'
   const userAgent = req.headers['user-agent'] || 'unknown';
   const ipHash = createHash(ip);
   const deviceHash = createHash(userAgent);
-  // ------------------------------------------
 
   // Validación básica de entrada
   if (!token || !walletAddress || !blockchain) {
@@ -98,7 +114,7 @@ app.post('/api/claim', async (req, res) => {
       throw new Error('Este token ya fue reclamado.');
     }
 
-    // --- TAREA 5: Lógica de Límite (Revisión de Usuario) ---
+    // Lógica de Límite (Revisión de Usuario)
     let userId;
 
     // 1. Buscar si esta billetera, IP, o dispositivo ya existe
@@ -117,12 +133,8 @@ app.post('/api/claim', async (req, res) => {
       );
       
       if (existingClaim.rows.length > 0) {
-        // ¡Este usuario (billetera/ip/dispositivo) ya reclamó con éxito!
         throw new Error('Límite de reclamación alcanzado para esta billetera, IP o dispositivo.');
       }
-      
-      // Si el usuario existe pero sus reclamos anteriores fallaron,
-      // se le permite volver a intentarlo (con este nuevo token).
 
     } else {
       // 3. Si no existe, es un usuario nuevo. Lo creamos.
@@ -132,7 +144,6 @@ app.post('/api/claim', async (req, res) => {
       );
       userId = newUser.rows[0].id;
     }
-    // --- FIN LÓGICA TAREA 5 ---
 
 
     // Paso 4: Crear el registro de la reclamación

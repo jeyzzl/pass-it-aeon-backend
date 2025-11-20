@@ -4,7 +4,7 @@ const db = require('./db');
 const { sendEVMToken } = require('./utils/evmFaucet');
 const { sendSolanaToken } = require('./utils/solanaFaucet');
 
-// Intervalo de sondeo (ej. cada 10 segundos)
+// Intervalo de sondeo (cada 10 segundos)
 const POLLING_INTERVAL_MS = 10000;
 
 async function processClaim(claim) {
