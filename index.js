@@ -3,6 +3,7 @@ require('dotenv').config();
 
 // Importar dependencias
 const express = require('express');
+const cors = require('cors');
 const db = require('./db');
 const { validateToken } = require('./utils/tokenService');
 const { createHash } = require('./utils/hash');
@@ -16,6 +17,30 @@ const app = express();
 app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 
+// =======================================================
+// CONFIGURACIÓN DE CORS (CRÍTICO PARA PRODUCCIÓN)
+// =======================================================
+const allowedOrigins = [
+  'http://localhost:3000',                    // Para pruebas locales
+  'https://pass-it-aeon-frontend.vercel.app', // Tu dominio de Vercel por defecto
+  'https://passitaeon.com',                   // Tu dominio final (cuando lo compres)
+  'https://www.passitaeon.com'
+];
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // Permitir peticiones sin origen (como Postman o scripts de servidor)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) === -1) {
+      const msg = 'La política CORS de este sitio no permite acceso desde el origen especificado.';
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
+  },
+  credentials: true // Permitir cookies/headers autorizados si fuera necesario
+}));
+
 // Middlewares
 app.use(express.json());
 
@@ -26,6 +51,17 @@ app.get('/c/:token', generalLimiter, async (req, res) => {
   try {
     const { token } = req.params;
 
+    // --- LOGS DE DIAGNÓSTICO (BORRAR LUEGO) ---
+    console.log("🔍 DIAGNÓSTICO DE TOKEN:");
+    console.log("1. Token Recibido:", token);
+
+    const secret = process.env.TOKEN_SECRET_V1;
+    // Imprimimos solo los primeros y últimos caracteres para ver si hay espacios sin revelar la clave
+    if (secret) {
+      console.log(`2. Secreto en Railway: '${secret.substring(0,3)}...${secret.substring(secret.length-3)}' (Longitud: ${secret.length})`);
+    } else {
+      console.error("❌ ERROR: TOKEN_SECRET_V1 no está definido en Railway");
+    }
     // Paso 1: Validar el HMAC del token
     const { isValid, payload } = validateToken(token);
 
@@ -73,9 +109,10 @@ app.post('/api/claim', claimLimiter, async (req, res) => {
   const { token, walletAddress, blockchain, captchaToken } = req.body;
 
   // Obtener y hashear IP/Device
-  const ip = req.ip;
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+
+  // Verificar Captcha
   const isHuman = await verifyCaptcha(captchaToken, ip);
-  
   if (!isHuman) {
     // Si falla el captcha, rechazamos antes de tocar la base de datos
     return res.status(400).json({ success: false, error: 'Falló la verificación de CAPTCHA (o eres un robot).' });
