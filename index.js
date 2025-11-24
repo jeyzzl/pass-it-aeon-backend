@@ -374,6 +374,6 @@ app.get('/api/profile/:walletAddress', async (req, res) => {
 });
 
 // 5. Iniciar el servidor
-app.listen(PORT, () => {
-  console.log(`Servidor de pass-it-aeon corriendo en http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Servidor corriendo en puerto ${PORT} (Escuchando en 0.0.0.0)`);
 });
