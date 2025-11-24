@@ -184,22 +184,79 @@ app.post('/api/claim', claimLimiter, async (req, res) => {
         newCodes.push(fullToken);
     }
 
-    // Solo damos puntos si el código tiene un "Padre" (no es un código génesis del admin)
-    // Y evitamos que el usuario se de puntos a sí mismo (aunque la lógica de claim ya previene el auto-uso)
+    // --- LOGICA DE PUNTOS MULTINIVEL & REFILL (PADRE + ABUELO) ---
     if (qrCode.generated_by && qrCode.generated_by !== userId) {
         
-        // 1. Leer configuración de puntos
-        const pointsPerRefStr = await getSetting('points_per_referral', '100');
-        const pointsPerRef = parseInt(pointsPerRefStr, 10);
+        const fatherId = qrCode.generated_by;
 
-        // 2. Sumar puntos al Padre
+        // 1. Configuración de Puntos Base
+        const pointsPerRefStr = await getSetting('points_per_referral', '100');
+        const pointsBase = parseInt(pointsPerRefStr, 10);
+
+        // --- A) PAGO DE PUNTOS (NIVEL 1) ---
         await client.query(
             'UPDATE users SET points = points + $1 WHERE id = $2',
-            [pointsPerRef, qrCode.generated_by]
+            [pointsBase, fatherId]
         );
+        console.log(`[PUNTOS L1] Usuario ${fatherId} ganó ${pointsBase} pts.`);
 
-        console.log(`[PUNTOS] Usuario ${qrCode.generated_by} ganó ${pointsPerRef} puntos por referido.`);
-    }   
+        // --- B) LOGICA DE REFILL (MUNICIÓN INFINITA) ---
+        // Leemos cuántos códigos regalar al padre por este éxito
+        const refillAmountStr = await getSetting('refill_codes_per_success', '1');
+        const refillAmount = parseInt(refillAmountStr, 10);
+
+        if (refillAmount > 0) {
+            // Calculamos expiración (usamos la misma config global o 24h por defecto)
+            const expirationHoursStr = await getSetting('code_expiration_hours', '24');
+            const expirationHours = parseInt(expirationHoursStr, 10);
+            const refillExpiresAt = new Date();
+            refillExpiresAt.setHours(refillExpiresAt.getHours() + expirationHours);
+
+            for (let k = 0; k < refillAmount; k++) {
+                // Generamos token usando la misma función que usaste arriba
+                const fullTokenRefill = generateToken(); 
+                const [payloadR, versionStrR, signatureR] = fullTokenRefill.split('.');
+                const versionR = parseInt(versionStrR.replace('v', ''), 10);
+
+                // Insertamos vinculado al PADRE (fatherId)
+                await client.query(
+                    `INSERT INTO qr_codes (token, hmac_signature, version, expires_at, generated_by) 
+                     VALUES ($1, $2, $3, $4, $5)`,
+                    [payloadR, signatureR, versionR, refillExpiresAt, fatherId]
+                );
+            }
+            console.log(`[REFILL] Se generaron ${refillAmount} nuevos códigos para el usuario ${fatherId}`);
+        }
+        // --- FIN REFILL ---
+
+        // --- C) PAGO DE PUNTOS (NIVEL 2 - ABUELO) ---
+        const grandfatherCheck = await client.query(`
+            SELECT q.generated_by as grandfather_id
+            FROM claims c
+            JOIN qr_codes q ON c.qr_code_id = q.id
+            WHERE c.user_id = $1 AND c.status = 'success'
+            LIMIT 1
+        `, [fatherId]);
+
+        if (grandfatherCheck.rows.length > 0) {
+            const grandfatherId = grandfatherCheck.rows[0].grandfather_id;
+
+            if (grandfatherId && grandfatherId !== fatherId) {
+                const level2PctStr = await getSetting('points_level_2_percentage', '20');
+                const level2Pct = parseInt(level2PctStr, 10);
+                const pointsLevel2 = Math.floor((pointsBase * level2Pct) / 100);
+
+                if (pointsLevel2 > 0) {
+                    await client.query(
+                        'UPDATE users SET points = points + $1 WHERE id = $2',
+                        [pointsLevel2, grandfatherId]
+                    );
+                    console.log(`[PUNTOS L2] Abuelo ${grandfatherId} ganó ${pointsLevel2} pts.`);
+                }
+            }
+        }
+    }
+    // --- FIN LOGICA PUNTOS --- 
 
     // Paso 5: Desactivar el token QR
     await client.query(
@@ -223,6 +280,59 @@ app.post('/api/claim', claimLimiter, async (req, res) => {
   
   } finally {
     client.release();
+  }
+});
+
+// =======================================================
+// Endpoint 3 - /api/profile/:walletAddress 
+// =======================================================
+app.get('/api/profile/:walletAddress', async (req, res) => {
+  const { walletAddress } = req.params;
+
+  try {
+    // 1. Obtener datos del usuario (Puntos y Ranking)
+    const userQuery = await db.query(`
+      SELECT 
+        id, 
+        points, 
+        wallet_address,
+        (SELECT COUNT(*) + 1 FROM users u2 WHERE u2.points > u1.points) as rank
+      FROM users u1 
+      WHERE wallet_address = $1
+    `, [walletAddress]);
+
+    if (userQuery.rows.length === 0) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+
+    const user = userQuery.rows[0];
+
+    // 2. Obtener sus códigos activos para compartir
+    const codesQuery = await db.query(`
+      SELECT token, version, hmac_signature
+      FROM qr_codes 
+      WHERE generated_by = $1 AND is_active = true
+      ORDER BY created_at DESC
+    `, [user.id]);
+
+    // 3. Obtener el Top 5 para el Leaderboard global
+    const leaderboardQuery = await db.query(`
+      SELECT wallet_address, points 
+      FROM users 
+      ORDER BY points DESC 
+      LIMIT 5
+    `);
+
+    res.json({
+      points: user.points,
+      rank: user.rank,
+      myCodes: codesQuery.rows.map(r => `${r.token}.v${r.version}.${r.hmac_signature}`),
+      globalLeaderboard: leaderboardQuery.rows
+    });
+
+  } catch (error) {
+    console.error('Error en profile:', error);
+    res.status(500).json({ error: 'Error interno' });
   }
 });
 

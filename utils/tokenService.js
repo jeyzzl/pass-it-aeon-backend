@@ -1,7 +1,5 @@
-// Carga las variables de entorno al inicio de tu app (ej. en index.js)
 // require('dotenv').config(); 
 
-// --- En tu archivo utils/tokenService.js ---
 const crypto = require('crypto');
 
 // Carga la clave secreta desde las variables de entorno

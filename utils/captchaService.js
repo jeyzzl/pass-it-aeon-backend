@@ -1,8 +1,6 @@
 const axios = require('axios');
 
-// Clave secreta de tu sitio en Cloudflare (ponla en tu .env)
-// Para pruebas locales, Cloudflare tiene claves dummy:
-// Secret: 1x0000000000000000000000000000000AA
+// Clave secreta del sitio en Cloudflare 
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '1x0000000000000000000000000000000AA';
 
 async function verifyCaptcha(token, ip) {

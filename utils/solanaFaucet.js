@@ -14,7 +14,6 @@ async function sendSolanaToken(claim) {
     const connection = new solanaWeb3.Connection(RPC_URL, 'confirmed');
 
     // 2. Cargar nuestra billetera de faucet
-    // (Asume que la clave está guardada como un string JSON "[1,2,3...]")
     const secretKey = bs58.decode(PRIVATE_KEY_STRING);
     const faucetKeypair = solanaWeb3.Keypair.fromSecretKey(secretKey);
 
