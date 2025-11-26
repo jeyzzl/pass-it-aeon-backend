@@ -6,16 +6,21 @@ const bs58 = require('bs58');
 const { ethers } = require('ethers');
 
 const EVM_NETWORKS = {
-    'ethereum': process.env.ETH_RPC_URL,   // Sepolia
-    'base': process.env.BASE_RPC_URL,      // Base Sepolia
-    'bnb': process.env.BNB_RPC_URL,
-    // Mapeo extra por si el frontend envía nombres distintos
-    'base-sepolia': process.env.BASE_RPC_URL 
+  'ethereum': {
+    rpc: process.env.ETH_RPC_URL,
+    contract: process.env.SPX_ERC20_ADDRESS_ETH, // Contrato en Sepolia
+    name: 'Ethereum Sepolia'
+  },
+  'base': {
+    rpc: process.env.BASE_RPC_URL,
+    contract: process.env.SPX_ERC20_ADDRESS_BASE, // Contrato en Base
+    name: 'Base Sepolia'
+  }
 };
 
 // --- CONFIGURACION ETHEREUM ---
 const FAUCET_PRIVATE_KEY_EVM = process.env.FAUCET_PRIVATE_KEY_EVM;
-const SPX_ERC20_ADDRESS = process.env.SPX_ERC20_ADDRESS;
+// const SPX_ERC20_ADDRESS = process.env.SPX_ERC20_ADDRESS;
 
 // --- CONFIGURACIÓN SOLANA ---
 const connection = new Connection(process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com', 'confirmed');
@@ -51,53 +56,59 @@ async function getSetting(client, key, defaultValue) {
 }
 
 // ============================================================
-// LÓGICA EVM (Dinámica según la red elegida)
+// LÓGICA EVM
 // ============================================================
 async function processEvmClaim(client, claim) {
-    // 1. Identificar qué RPC usar
-    const rpcUrl = EVM_NETWORKS[claim.blockchain];
-    if (!rpcUrl) return { success: false, error: `RPC no configurado para: ${claim.blockchain}` };
+  // 1. Identificar la configuración de red
+  const networkConfig = EVM_NETWORKS[claim.blockchain];
+  
+  if (!networkConfig || !networkConfig.rpc) {
+    return { success: false, error: `Red EVM no configurada: ${claim.blockchain}` };
+  }
+  
+  if (!networkConfig.contract) {
+    return { success: false, error: `Contrato SPX no configurado para ${claim.blockchain}` };
+  }
     
-    if (!FAUCET_PRIVATE_KEY_EVM || !SPX_ERC20_ADDRESS) return { success: false, error: "Faltan credenciales EVM." };
+  if (!FAUCET_PRIVATE_KEY_EVM) return { success: false, error: "Falta EVM Private Key." };
 
-    try {
-        // Conexión dinámica a la red específica
-        const provider = new ethers.JsonRpcProvider(rpcUrl);
-        const wallet = new ethers.Wallet(FAUCET_PRIVATE_KEY_EVM, provider);
-        
-        const amountStr = await getSetting(client, 'faucet_amount_spx', '6900');
-        console.log(`[EVM-${claim.blockchain.toUpperCase()}] Enviando ${amountStr} SPX a ${claim.wallet_address}...`);
+  try {
+    // Conexión dinámica a la red específica
+    const provider = new ethers.JsonRpcProvider(networkConfig.rpc);
+    const wallet = new ethers.Wallet(FAUCET_PRIVATE_KEY_EVM, provider);
+    
+    const amountStr = await getSetting(client, 'faucet_amount_spx', '6900');
+    console.log(`[${networkConfig.name.toUpperCase()}] Enviando ${amountStr} SPX a ${claim.wallet_address}...`);
 
-        // Contrato (ABI Mínimo)
-        const abi = [
-                "function transfer(address to, uint256 amount) returns (bool)",
-                "function balanceOf(address account) view returns (uint256)", 
-                "function decimals() view returns (uint8)"];
-        const contract = new ethers.Contract(SPX_ERC20_ADDRESS, abi, wallet);
+    // Contrato (ABI Mínimo)
+    const abi = [
+      "function transfer(address to, uint256 amount) returns (bool)",
+      "function balanceOf(address account) view returns (uint256)", 
+      "function decimals() view returns (uint8)"];
+    const contract = new ethers.Contract(networkConfig.contract, abi, wallet);
 
-        // Como es testnet, asumimos 18 decimales o leemos del contrato
-        // const decimals = await contract.decimals(); 
-        const decimals = 18; 
-        const amountToSend = ethers.parseUnits(String(amountStr), decimals);
+    // Como es testnet, asumimos 18 decimales o leemos del contrato
+    // const decimals = await contract.decimals(); 
+    const decimals = 18; 
+    const amountToSend = ethers.parseUnits(String(amountStr), decimals);
 
-        const balance = await contract.balanceOf(wallet.address);
-        console.log(`   💰 Saldo del Faucet: ${ethers.formatUnits(balance, decimals)} SPX`);
+    const balance = await contract.balanceOf(wallet.address);
+    console.log(`   💰 Saldo del Faucet: ${ethers.formatUnits(balance, decimals)} SPX`);
 
-        if (balance < amountToSend) {
-          throw new Error(`Saldo insuficiente en Faucet. Tienes ${ethers.formatUnits(balance, decimals)}, intentas enviar ${amountStr}`);
-        }
-        
-        const tx = await contract.transfer(claim.wallet_address, amountToSend);
-        console.log(`   Tx enviada: ${tx.hash}. Esperando confirmación...`);
-        
-        await tx.wait(1); // Esperar 1 bloque
-
-        return { success: true, txHash: tx.hash };
-
-    } catch (err) {
-        console.error(`[EVM ERROR - ${claim.blockchain}]`, err.message);
-        return { success: false, error: err.message };
+    if (balance < amountToSend) {
+      throw new Error(`Saldo insuficiente en Faucet. Tienes ${ethers.formatUnits(balance, decimals)}, intentas enviar ${amountStr}`);
     }
+    
+    const tx = await contract.transfer(claim.wallet_address, amountToSend);
+    console.log(`   Tx enviada: ${tx.hash}. Esperando confirmación...`);
+    
+    await tx.wait(1); // Esperar 1 bloque
+
+    return { success: true, txHash: tx.hash };
+  } catch (err) {
+      console.error(`[EVM ERROR - ${claim.blockchain}]`, err.message);
+      return { success: false, error: err.message };
+  }
 }
 
 // ============================================================
@@ -124,7 +135,7 @@ async function processSolanaClaim(client, claim) {
 
     const accountInfo = await getAccount(connection, fromTokenAccount.address);
     if (BigInt(accountInfo.amount) < amountToSend) {
-        return { success: false, error: `Faucet vacío. Tiene ${accountInfo.amount}, requiere ${amountToSend}` };
+      return { success: false, error: `Faucet vacío. Tiene ${accountInfo.amount}, requiere ${amountToSend}` };
     }
 
     const toTokenAccount = await getOrCreateAssociatedTokenAccount(
@@ -142,23 +153,22 @@ async function processSolanaClaim(client, claim) {
     
     transaction.add(
       SystemProgram.transfer({
-          fromPubkey: faucetKeypair.publicKey,
-          toPubkey: userPublicKey,
-          lamports: SOL_FOR_GAS,
+        fromPubkey: faucetKeypair.publicKey,
+        toPubkey: userPublicKey,
+        lamports: SOL_FOR_GAS,
       })
     );
 
     transaction.add(
       createTransferInstruction(
-          fromTokenAccount.address, 
-          toTokenAccount.address,   
-          faucetKeypair.publicKey,  
-          amountToSend
+        fromTokenAccount.address, 
+        toTokenAccount.address,   
+        faucetKeypair.publicKey,  
+        amountToSend
       )
     );
 
     // 3. FIRMA MANUAL Y ENVÍO SEGURO
-    // Obtenemos el blockhash más reciente
     const latestBlockhash = await connection.getLatestBlockhash('confirmed');
     transaction.recentBlockhash = latestBlockhash.blockhash;
     transaction.feePayer = faucetKeypair.publicKey;
@@ -166,8 +176,7 @@ async function processSolanaClaim(client, claim) {
     // Firmamos localmente
     transaction.sign(faucetKeypair);
     
-    // Obtenemos la firma ANTES de enviar (Esta es la clave)
-    // Si la red falla, ya tenemos el ID para buscar el recibo después
+    // Obtenemos la firma ANTES de enviar
     signature = bs58.encode(transaction.signature);
 
     console.log(`[ENVIANDO] Firma generada: ${signature}. Esperando confirmación...`);
@@ -194,26 +203,26 @@ async function processSolanaClaim(client, claim) {
     console.error("[SOLANA ERROR INICIAL]", err.message);
 
     // --- RED DE SEGURIDAD ---
-    // Si tenemos una firma, verificamos si de pura casualidad sí pasó
     if (signature) {
-        console.log(`[VERIFICANDO] Comprobando estado real de ${signature} en la blockchain...`);
-        try {
-            const status = await connection.getSignatureStatus(signature);
-            // Si la red dice que no tiene error y tiene confirmaciones, ¡fue un éxito!
-            if (status.value && (status.value.confirmationStatus === 'confirmed' || status.value.confirmationStatus === 'finalized')) {
-                console.log("✅ [RECUPERADO] La transacción sí fue exitosa a pesar del timeout.");
-                return { success: true, txHash: signature };
-            }
-        } catch (checkErr) {
-            console.log("No se pudo verificar el estado:", checkErr.message);
+      console.log(`[VERIFICANDO] Comprobando estado real de ${signature} en la blockchain...`);
+      try {
+        const status = await connection.getSignatureStatus(signature);
+        if (status.value && (status.value.confirmationStatus === 'confirmed' || status.value.confirmationStatus === 'finalized')) {
+          console.log("✅ [RECUPERADO] La transacción sí fue exitosa a pesar del timeout.");
+          return { success: true, txHash: signature };
         }
+      } catch (checkErr) {
+        console.log("No se pudo verificar el estado:", checkErr.message);
+      }
     }
 
     return { success: false, error: err.message };
   }
 }
 
+// ============================================================
 // --- BUCLE PRINCIPAL ---
+// ============================================================
 async function checkDatabaseForJobs() {
   const client = await db.getClient(); 
   try {
@@ -248,15 +257,6 @@ async function checkDatabaseForJobs() {
     else {
       result = { success: false, error: `Red no soportada: ${claim.blockchain}` };
     }
-    
-    // switch (claim.blockchain) {
-    //   case 'solana':
-    //     result = await processSolanaClaim(client, claim);
-    //     break;
-      
-    //   default:
-    //     result = { success: false, error: 'Blockchain no soportada.' };
-    // }
 
     if (result.success) {
       console.log(`[ÉXITO FINAL] Tx: ${result.txHash}`);
