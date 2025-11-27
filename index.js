@@ -373,6 +373,34 @@ app.get('/api/profile/:walletAddress', async (req, res) => {
   }
 });
 
+// =======================================================
+// Endpoint 4 - /api/leaderboard (Público)
+// =======================================================
+app.get('/api/leaderboard', generalLimiter, async (req, res) => {
+  try {
+    // Obtenemos el Top 50 ordenado por puntos
+    const query = `
+      SELECT wallet_address, points 
+      FROM users 
+      WHERE points > 0
+      ORDER BY points DESC 
+      LIMIT 50
+    `;
+    const { rows } = await db.query(query);
+
+    // Opcional: Enmascarar las wallets para privacidad (ej: 0x123...456)
+    const sanitizedRows = rows.map(row => ({
+      ...row,
+      wallet_address: `${row.wallet_address.substring(0, 6)}...${row.wallet_address.substring(row.wallet_address.length - 4)}`
+    }));
+
+    res.json({ leaderboard: sanitizedRows });
+  } catch (error) {
+    console.error('Error leaderboard:', error);
+    res.status(500).json({ error: 'Error al obtener ranking' });
+  }
+});
+
 // 5. Iniciar el servidor
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT} (Escuchando en 0.0.0.0)`);
