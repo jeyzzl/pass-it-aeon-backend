@@ -321,12 +321,128 @@ app.post('/api/claim', claimLimiter, async (req, res) => {
 });
 
 // =======================================================
-// Endpoint 3 - /api/profile/:walletAddress 
+// Endpoint 3 - /api/regenerate
+// =======================================================
+app.post('/api/regenerate', generalLimiter, async (req, res) => {
+  const { walletAddress } = req.body;
+  if (!walletAddress) return res.status(400).json({ error: 'Wallet required' });
+
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Obtener ID del usuario
+    const userRes = await client.query('SELECT id FROM users WHERE wallet_address = $1', [walletAddress]);
+    if (userRes.rows.length === 0) throw new Error('Usuario no encontrado');
+    const userId = userRes.rows[0].id;
+
+    // 2. Contar códigos VÁLIDOS (Activos y NO expirados)
+    const activeQuery = `
+      SELECT count(*) FROM qr_codes 
+      WHERE generated_by = $1 
+      AND is_active = true 
+      AND expires_at > NOW()
+    `;
+    const { rows } = await client.query(activeQuery, [userId]);
+    const activeCount = parseInt(rows[0].count);
+
+    // 3. Obtener límite dinámico desde DB
+    const limitStr = await getSetting('child_codes_per_claim', '3');
+    const limit = parseInt(limitStr, 10);
+    
+    if (activeCount >= limit) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, error: `Ya tienes el máximo de ${limit} códigos activos.` });
+    }
+
+    // 4. Calcular cuántos faltan y generarlos
+    const needed = limit - activeCount;
+    const expirationHoursStr = await getSetting('code_expiration_hours', '24');
+    const expirationHours = parseInt(expirationHoursStr, 10);
+    
+    const expiresAt = new Date();
+    expiresAt.setHours(expiresAt.getHours() + expirationHours);
+
+    const newCodes = [];
+
+    for (let i = 0; i < needed; i++) {
+        const fullToken = generateToken(); 
+        const [payload, versionStr, signature] = fullToken.split('.');
+        const version = parseInt(versionStr.replace('v', ''), 10);
+
+        await client.query(
+            `INSERT INTO qr_codes (token, hmac_signature, version, expires_at, generated_by) 
+             VALUES ($1, $2, $3, $4, $5)`,
+            [payload, signature, version, expiresAt, userId]
+        );
+        newCodes.push(fullToken);
+    }
+
+    await client.query('COMMIT');
+    res.json({ success: true, newCodes });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error regenerando:', error);
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+// =======================================================
+// Endpoint 4 - /api/admin/genesis
+// =======================================================
+app.post('/api/admin/genesis', async (req, res) => {
+  const { secret, count, days } = req.body;
+
+  if (secret !== ADMIN_PASSWORD) {
+    return res.status(403).json({ error: 'Acceso denegado' });
+  }
+
+  try {
+    const loopCount = count || 1;
+    const validDays = days || 14; // 14 días default
+    
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + validDays);
+
+    const generatedCodes = [];
+
+    for (let i = 0; i < loopCount; i++) {
+      const fullToken = generateToken();
+      const [payload, versionStr, signature] = fullToken.split('.');
+      const version = parseInt(versionStr.replace('v', ''), 10);
+
+      // Insertamos con generated_by = NULL (o un ID de admin si tienes uno en users)
+      // Al ser NULL, no dará puntos a nadie (o podrías asignarlo a tu wallet)
+      await db.query(
+        `INSERT INTO qr_codes (token, hmac_signature, version, expires_at, generated_by, is_active) 
+         VALUES ($1, $2, $3, $4, NULL, true)`,
+        [payload, signature, version, expiresAt]
+      );
+
+      generatedCodes.push(fullToken);
+    }
+
+    res.json({ success: true, codes: generatedCodes });
+
+  } catch (error) {
+    console.error('Error admin genesis:', error);
+    res.status(500).json({ error: 'Error generando genesis' });
+  }
+});
+
+// =======================================================
+// Endpoint 5 - /api/profile/:walletAddress 
 // =======================================================
 app.get('/api/profile/:walletAddress', async (req, res) => {
   const { walletAddress } = req.params;
 
   try {
+    const limitStr = await getSetting('child_codes_per_claim', '3');
+    const maxCodes = parseInt(limitStr, 10);
+
     // 1. Obtener datos del usuario (Puntos y Ranking)
     const userQuery = await db.query(`
       SELECT 
@@ -348,7 +464,9 @@ app.get('/api/profile/:walletAddress', async (req, res) => {
     const codesQuery = await db.query(`
       SELECT token, version, hmac_signature
       FROM qr_codes 
-      WHERE generated_by = $1 AND is_active = true
+      WHERE generated_by = $1
+      AND is_active = true
+      AND expires_at > NOW()
       ORDER BY created_at DESC
     `, [user.id]);
 
@@ -364,7 +482,8 @@ app.get('/api/profile/:walletAddress', async (req, res) => {
       points: user.points,
       rank: user.rank,
       myCodes: codesQuery.rows.map(r => `${r.token}.v${r.version}.${r.hmac_signature}`),
-      globalLeaderboard: leaderboardQuery.rows
+      globalLeaderboard: leaderboardQuery.rows,
+      maxCodes: maxCodes
     });
 
   } catch (error) {
