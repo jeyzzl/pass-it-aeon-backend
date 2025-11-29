@@ -396,7 +396,7 @@ app.post('/api/regenerate', generalLimiter, async (req, res) => {
 app.post('/api/admin/genesis', async (req, res) => {
   const { secret, count, days } = req.body;
 
-  if (secret !== ADMIN_PASSWORD) {
+  if (secret !== process.env.ADMIN_PASSWORD) {
     return res.status(403).json({ error: 'Acceso denegado' });
   }
 
