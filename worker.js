@@ -20,12 +20,11 @@ const EVM_NETWORKS = {
 
 // --- CONFIGURACION ETHEREUM ---
 const FAUCET_PRIVATE_KEY_EVM = process.env.FAUCET_PRIVATE_KEY_EVM;
-// const SPX_ERC20_ADDRESS = process.env.SPX_ERC20_ADDRESS;
 
 // --- CONFIGURACIÓN SOLANA ---
-const connection = new Connection(process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com', 'confirmed');
+const connection = new Connection(process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com', 'confirmed');
 const TOKEN_MINT_ADDRESS = new PublicKey(process.env.SPX_TOKEN_MINT);
-const SPX_DECIMALS = 9; 
+const SPX_DECIMALS = 8; 
 const SOL_FOR_GAS = 0.002 * 1000000000; 
 
 // --- DECODIFICACIÓN LLAVE ---
@@ -118,7 +117,7 @@ async function processSolanaClaim(client, claim) {
   let signature = null; // Guardaremos la firma aquí para verificarla luego
 
   try {
-    const amountStr = await getSetting(client, 'faucet_amount_spx', '6900');
+    const amountStr = await getSetting(client, 'faucet_amount_spx', '1');
     const amountToSend = BigInt(Math.floor(parseFloat(amountStr) * (10 ** SPX_DECIMALS)));
     
     console.log(`[SOLANA] Configurado para enviar ${amountStr} SPX...`);
@@ -282,6 +281,6 @@ async function checkDatabaseForJobs() {
   }
 }
 
-console.log('--- Iniciando Faucet Worker (Local & Multi-Chain) ---');
+console.log('--- Iniciando Faucet Worker (SOL Mainnet) ---');
 if (faucetKeypair) console.log(`[SOLANA] Activo: ${faucetKeypair.publicKey.toBase58()}`);
 setInterval(checkDatabaseForJobs, POLLING_INTERVAL_MS);
