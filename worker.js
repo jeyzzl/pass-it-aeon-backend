@@ -9,12 +9,12 @@ const EVM_NETWORKS = {
   'ethereum': {
     rpc: process.env.ETH_RPC_URL,
     contract: process.env.SPX_ERC20_ADDRESS_ETH, // Contrato en Sepolia
-    name: 'Ethereum Sepolia'
+    name: 'Ethereum'
   },
   'base': {
     rpc: process.env.BASE_RPC_URL,
     contract: process.env.SPX_ERC20_ADDRESS_BASE, // Contrato en Base
-    name: 'Base Sepolia'
+    name: 'Base'
   }
 };
 
@@ -88,7 +88,9 @@ async function processEvmClaim(client, claim) {
 
     // Como es testnet, asumimos 18 decimales o leemos del contrato
     // const decimals = await contract.decimals(); 
-    const decimals = 18; 
+    const decimals = await contract.decimals(); 
+    console.log(` Decimales detectados en contrato: ${decimals}`);
+    
     const amountToSend = ethers.parseUnits(String(amountStr), decimals);
 
     const balance = await contract.balanceOf(wallet.address);
