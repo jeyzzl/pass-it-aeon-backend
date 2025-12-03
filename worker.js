@@ -76,7 +76,7 @@ async function processEvmClaim(client, claim) {
     const provider = new ethers.JsonRpcProvider(networkConfig.rpc);
     const wallet = new ethers.Wallet(FAUCET_PRIVATE_KEY_EVM, provider);
     
-    const amountStr = await getSetting(client, 'faucet_amount_spx', '6900');
+    const amountStr = await getSetting(client, 'faucet_amount_spx', '1');
     console.log(`[${networkConfig.name.toUpperCase()}] Enviando ${amountStr} SPX a ${claim.wallet_address}...`);
 
     // Contrato (ABI Mínimo)
