@@ -127,6 +127,23 @@ app.post('/api/claim', claimLimiter, async (req, res) => {
     return res.status(400).json({ success: false, error: 'Faltan token, walletAddress o blockchain.' });
   }
 
+  // Validar que el formato de wallet corresponde al blockchain
+  const validateAddressFormat = (address, blockchain) => {
+    if (blockchain === 'solana') {
+      // Solana addresses are base58 encoded, length 32-44 chars
+      return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address);
+    } 
+    else if (['ethereum', 'base', 'bnb'].includes(blockchain)) {
+      // EVM addresses: 0x followed by 40 hex chars
+      return /^0x[a-fA-F0-9]{40}$/.test(address);
+    }
+    return true;
+  };
+
+  if (!validateAddressFormat(walletAddress, blockchain)) {
+    return res.status(400).json({ success: false, error: `Invalid ${blockchain} address format.` });
+  }
+
   const client = await db.getClient();
 
   try {
@@ -186,10 +203,17 @@ app.post('/api/claim', claimLimiter, async (req, res) => {
 
 
     // Paso 4: Crear el registro de la reclamación
-    await client.query(
-      'INSERT INTO claims (user_id, qr_code_id, blockchain) VALUES ($1, $2, $3)',
+    // --- PREVIOUS
+    // await client.query(
+    //   'INSERT INTO claims (user_id, qr_code_id, blockchain) VALUES ($1, $2, $3)',
+    //   [userId, qrCode.id, blockchain]
+    // );
+    // --- NEW: STATUS POLLING
+    const claimResult = await client.query(
+      'INSERT INTO claims (user_id, qr_code_id, blockchain) VALUES ($1, $2, $3) RETURNING id',
       [userId, qrCode.id, blockchain]
     );
+    const claimId = claimResult.rows[0].id;
 
     // 1. Leer configuración
     const codesToGenerateStr = await getSetting('child_codes_per_claim', '3');
@@ -307,7 +331,8 @@ app.post('/api/claim', claimLimiter, async (req, res) => {
     res.status(201).json({ 
       success: true, 
       message: '¡Reclamación encolada! El Faucet la procesará pronto.',
-      newCodes: newCodes
+      newCodes: newCodes,
+      claimId: claimId
     });
 
   } catch (err) {
@@ -493,7 +518,7 @@ app.get('/api/profile/:walletAddress', async (req, res) => {
 });
 
 // =======================================================
-// Endpoint 4 - /api/leaderboard (Público)
+// Endpoint 6 - /api/leaderboard (Público)
 // =======================================================
 app.get('/api/leaderboard', generalLimiter, async (req, res) => {
   try {
@@ -517,6 +542,64 @@ app.get('/api/leaderboard', generalLimiter, async (req, res) => {
   } catch (error) {
     console.error('Error leaderboard:', error);
     res.status(500).json({ error: 'Error al obtener ranking' });
+  }
+});
+
+// =======================================================
+// Endpoint 7 - /api/claim/:claimId/status
+// =======================================================
+app.get('/api/claim/:claimId/status', generalLimiter, async (req, res) => {
+  const { claimId } = req.params;
+
+  try {
+    const { rows } = await db.query(
+      `SELECT c.*, u.wallet_address, qr.token as qr_token
+       FROM claims c
+       JOIN users u ON c.user_id = u.id
+       JOIN qr_codes qr ON c.qr_code_id = qr.id
+       WHERE c.id = $1`,
+      [claimId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Claim not found' });
+    }
+
+    const claim = rows[0];
+    
+    // Generate explorer links based on blockchain
+    let explorerLink = null;
+    if (claim.tx_hash) {
+      switch (claim.blockchain) {
+        case 'solana':
+          explorerLink = `https://solscan.io/tx/${claim.tx_hash}`;
+          break;
+        case 'ethereum':
+          explorerLink = `https://etherscan.io/tx/${claim.tx_hash}`;
+          break;
+        case 'base':
+          explorerLink = `https://basescan.org/tx/${claim.tx_hash}`;
+          break;
+        default:
+          explorerLink = null;
+      }
+    }
+
+    res.json({
+      claimId: claim.id,
+      status: claim.status,
+      txHash: claim.tx_hash,
+      explorerLink,
+      blockchain: claim.blockchain,
+      walletAddress: claim.wallet_address,
+      error: claim.error_log,
+      createdAt: claim.claimed_at,
+      updatedAt: claim.updated_at
+    });
+
+  } catch (error) {
+    console.error('Error fetching claim status:', error);
+    res.status(500).json({ error: 'Error fetching claim status' });
   }
 });
 
