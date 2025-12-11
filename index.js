@@ -203,12 +203,6 @@ app.post('/api/claim', claimLimiter, async (req, res) => {
 
 
     // Paso 4: Crear el registro de la reclamación
-    // --- PREVIOUS
-    // await client.query(
-    //   'INSERT INTO claims (user_id, qr_code_id, blockchain) VALUES ($1, $2, $3)',
-    //   [userId, qrCode.id, blockchain]
-    // );
-    // --- NEW: STATUS POLLING
     const claimResult = await client.query(
       'INSERT INTO claims (user_id, qr_code_id, blockchain) VALUES ($1, $2, $3) RETURNING id',
       [userId, qrCode.id, blockchain]
@@ -562,7 +556,7 @@ app.get('/api/claim/:claimId/status', generalLimiter, async (req, res) => {
     );
 
     if (rows.length === 0) {
-      return res.status(404).json({ error: 'Claim not found' });
+      return res.status(404).json({ error: 'Claim no encontrado' });
     }
 
     const claim = rows[0];
@@ -598,8 +592,80 @@ app.get('/api/claim/:claimId/status', generalLimiter, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error fetching claim status:', error);
-    res.status(500).json({ error: 'Error fetching claim status' });
+    console.error('Error obteniendo el estado del reclamo:', error);
+    res.status(500).json({ error: 'Error obteniendo el estado del reclamo' });
+  }
+});
+
+// =======================================================
+// Endpoint 8 - /api/admin/monitoring/health
+// =======================================================
+app.get('/api/admin/monitoring/health', async (req, res) => {
+  const { secret } = req.query;
+  
+  if (secret !== process.env.ADMIN_PASSWORD) {
+    return res.status(403).json({ error: 'Acceso denegado' });
+  }
+
+  try {
+    const [healthResult, balancesResult, failedClaimsResult] = await Promise.all([
+      db.query('SELECT * FROM worker_health ORDER BY last_heartbeat DESC LIMIT 5'),
+      db.query('SELECT * FROM faucet_balances ORDER BY last_checked DESC'),
+      db.query(`SELECT COUNT(*) as count FROM claims WHERE status = 'failed' AND retry_count >= 3`)
+    ]);
+
+    res.json({
+      worker_health: healthResult.rows,
+      faucet_balances: balancesResult.rows,
+      failed_claims: parseInt(failedClaimsResult.rows[0].count),
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo info de monitoreo:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// =======================================================
+// Endpoint 9 - /api/admin/claims/retry/:claimId
+// =======================================================
+app.post('/api/admin/claims/retry/:claimId', async (req, res) => {
+  const { secret } = req.body;
+  
+  if (secret !== process.env.ADMIN_PASSWORD) {
+    return res.status(403).json({ error: 'Acceso denegado' });
+  }
+
+  const { claimId } = req.params;
+
+  try {
+    const { rows } = await db.query(`
+      UPDATE claims 
+      SET status = 'pending', 
+          retry_count = 0,
+          next_retry_at = NULL,
+          updated_at = NOW()
+      WHERE id = $1 
+      AND status = 'failed'
+      RETURNING *
+    `, [claimId]);
+
+    if (rows.length === 0) {
+      return res.status(404).json({ 
+        error: 'Reclamo no encontrado o reintentos expirados' 
+      });
+    }
+
+    res.json({ 
+      success: true, 
+      message: 'Reclamo encolado para reintento',
+      claim: rows[0]
+    });
+
+  } catch (error) {
+    console.error('Error reintentando reclamo:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 

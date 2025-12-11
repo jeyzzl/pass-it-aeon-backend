@@ -4,6 +4,7 @@ const { Connection, Keypair, PublicKey, Transaction, SystemProgram, ComputeBudge
 const { getOrCreateAssociatedTokenAccount, createTransferInstruction, getAccount } = require('@solana/spl-token');
 const bs58 = require('bs58'); 
 const { ethers } = require('ethers');
+const { monitorBalances } = require('./utils/balanceMonitor');
 
 const EVM_NETWORKS = {
   'ethereum': {
@@ -53,6 +54,55 @@ async function getSetting(client, key, defaultValue) {
   }
   return defaultValue;
 }
+
+// --- CONFIGURACION DE RETRY ---
+const MAX_RETRIES = 3;
+const RETRY_DELAYS = [30000, 60000, 120000]; // 30s, 1min, 2min in milliseconds
+
+// --- CONFIGURACION DE WORKER HEALTH ---
+const BALANCE_CHECK_INTERVAL = 30 * 60 * 1000;
+let lastBalanceCheck = 0;
+
+// ============================================================
+// LÓGICA WORKER HEALTH
+// ============================================================
+async function updateWorkerHealth(status = 'healthy', errorMessage = null) {
+  const client = await db.getClient();
+  try {
+    await client.query(
+      `INSERT INTO worker_health (worker_type, last_heartbeat, status, error_message)
+       VALUES ('faucet_worker', NOW(), $1, $2)
+       ON CONFLICT (worker_type) DO UPDATE SET
+       last_heartbeat = NOW(),
+       status = EXCLUDED.status,
+       error_message = EXCLUDED.error_message`,
+      [status, errorMessage]
+    );
+  } catch (error) {
+    console.error('[HEALTH MONITOR] Error updating health:', error.message);
+  } finally {
+    client.release();
+  }
+}
+
+async function workerLoop() {
+  try {
+    await checkDatabaseForJobs();
+    await updateWorkerHealth('healthy');
+    
+    // Check balances every 30 minutes
+    const now = Date.now();
+    if (now - lastBalanceCheck > BALANCE_CHECK_INTERVAL) {
+      lastBalanceCheck = now;
+      await monitorBalances();
+    }
+    
+  } catch (error) {
+    console.error('[WORKER LOOP ERROR]', error.message);
+    await updateWorkerHealth('error', error.message);
+  }
+}
+
 
 // ============================================================
 // LÓGICA EVM
@@ -233,11 +283,25 @@ async function checkDatabaseForJobs() {
       SELECT c.*, u.wallet_address 
       FROM claims c
       JOIN users u ON c.user_id = u.id
-      WHERE c.status = 'pending' 
+      WHERE (
+        c.status = 'pending' 
+        OR (
+          c.status = 'failed' 
+          AND c.retry_count < $1
+          AND (
+            c.next_retry_at IS NULL 
+            OR c.next_retry_at <= NOW()
+          )
+        )
+      )
+      ORDER BY 
+        CASE WHEN c.status = 'pending' THEN 1 ELSE 2 END,
+        c.claimed_at ASC
       LIMIT 1 
       FOR UPDATE SKIP LOCKED;
     `;
-    const { rows } = await client.query(jobQuery);
+
+    const { rows } = await client.query(jobQuery, [MAX_RETRIES]);
 
     if (rows.length === 0) {
       await client.query('COMMIT');
@@ -245,7 +309,7 @@ async function checkDatabaseForJobs() {
     }
 
     const claim = rows[0];
-    console.log(`[WORKER] Procesando claim ID: ${claim.id} para ${claim.blockchain} | Address: ${claim.wallet_address}`);
+    console.log(`[WORKER] Procesando claim ID: ${claim.id} para ${claim.blockchain} | Address: ${claim.wallet_address} | Retry: ${claim.retry_count}/${MAX_RETRIES}`);
 
     let result;
 
@@ -262,15 +326,52 @@ async function checkDatabaseForJobs() {
     if (result.success) {
       console.log(`[ÉXITO FINAL] Tx: ${result.txHash}`);
       await client.query(
-        "UPDATE claims SET status = 'success', tx_hash = $1, updated_at = NOW() WHERE id = $2",
+        `UPDATE claims 
+         SET status = 'success', 
+             tx_hash = $1, 
+             updated_at = NOW(),
+             retry_count = 0,
+             next_retry_at = NULL
+         WHERE id = $2`,
         [result.txHash, claim.id]
       );
     } else {
-      console.log(`[FALLO FINAL] ${result.error}`);
-      await client.query(
-        "UPDATE claims SET status = 'failed', error_log = $1, updated_at = NOW() WHERE id = $2",
-        [result.error, claim.id]
-      );
+      console.log(`[FALLO TEMPORAL] ${result.error}`);
+
+      const newRetryCount = claim.retry_count + 1;
+      const nextRetryAt = new Date(Date.now() + RETRY_DELAYS[newRetryCount - 1]);
+
+      if (newRetryCount < MAX_RETRIES) {
+        // Schedule retry
+        await client.query(
+          `UPDATE claims 
+            SET status = 'failed', 
+              error_log = $1, 
+              updated_at = NOW(),
+              retry_count = $2,
+              last_retry_at = NOW(),
+              next_retry_at = $3
+            WHERE id = $4`,
+          [result.error, newRetryCount, nextRetryAt, claim.id]
+        );
+
+        console.log(`[RETRY SCHEDULED] Next retry at ${nextRetryAt.toISOString()}`);
+      } else {
+        // Final failure
+        await client.query(
+          `UPDATE claims 
+           SET status = 'failed', 
+              error_log = $1,
+              updated_at = NOW(),
+              retry_count = $2,
+              last_retry_at = NOW(),
+              next_retry_at = NULL
+           WHERE id = $3`,
+          [result.error, newRetryCount, claim.id]
+        );
+
+        console.log(`[FINAL FAILURE] Max retries reached for claim ${claim.id}`);
+      }
     }
 
     await client.query('COMMIT');
@@ -285,4 +386,9 @@ async function checkDatabaseForJobs() {
 
 console.log('--- Iniciando Faucet Worker (SOL Mainnet) ---');
 if (faucetKeypair) console.log(`[SOLANA] Activo: ${faucetKeypair.publicKey.toBase58()}`);
-setInterval(checkDatabaseForJobs, POLLING_INTERVAL_MS);
+
+// --- EMPEZAR HEALTH CHECKER ---
+updateWorkerHealth('starting');
+setTimeout(() => monitorBalances(), 5000);
+
+setInterval(workerLoop, POLLING_INTERVAL_MS);
