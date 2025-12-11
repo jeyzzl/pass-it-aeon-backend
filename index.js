@@ -610,14 +610,45 @@ app.get('/api/admin/monitoring/health', async (req, res) => {
   try {
     const [healthResult, balancesResult, failedClaimsResult] = await Promise.all([
       db.query('SELECT * FROM worker_health ORDER BY last_heartbeat DESC LIMIT 5'),
-      db.query('SELECT * FROM faucet_balances ORDER BY last_checked DESC'),
+      db.query(`
+        SELECT 
+          blockchain,
+          COALESCE(native_balance, 0)::float as native_balance,
+          COALESCE(token_balance, 0)::float as token_balance,
+          last_checked,
+          created_at
+        FROM faucet_balances 
+        ORDER BY last_checked DESC
+      `),
       db.query(`SELECT COUNT(*) as count FROM claims WHERE status = 'failed' AND retry_count >= 3`)
     ]);
 
+    const faucet_balances = balancesResult.rows.map(row => {
+      const nativeBalance = parseFloat(row.native_balance) || 0;
+      const tokenBalance = parseFloat(row.token_balance) || 0;
+      
+      // Determine thresholds based on blockchain
+      let nativeThreshold = 0.01;
+      let tokenThreshold = 10;
+      
+      if (row.blockchain === 'solana') {
+        nativeThreshold = 0.1; // SOL threshold
+      }
+      
+      return {
+        ...row,
+        native_balance: nativeBalance,
+        token_balance: tokenBalance,
+        native_threshold: nativeThreshold,
+        token_threshold: tokenThreshold,
+        is_low: nativeBalance < nativeThreshold || tokenBalance < tokenThreshold
+      };
+    });
+
     res.json({
       worker_health: healthResult.rows,
-      faucet_balances: balancesResult.rows,
-      failed_claims: parseInt(failedClaimsResult.rows[0].count),
+      faucet_balances: faucet_balances,
+      failed_claims: parseInt(failedClaimsResult.rows[0].count || 0, 10),
       timestamp: new Date().toISOString()
     });
 

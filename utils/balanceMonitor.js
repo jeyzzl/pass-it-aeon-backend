@@ -166,6 +166,9 @@ async function updateBalanceInDatabase(balances) {
         await client.query('ROLLBACK');
         return;
       }
+
+      const nativeBalance = isNaN(balance.native_balance) ? 0 : balance.native_balance;
+      const tokenBalance = isNaN(balance.token_balance) ? 0 : balance.token_balance;
       
       // Try to insert/update
       await client.query(
@@ -176,14 +179,14 @@ async function updateBalanceInDatabase(balances) {
          native_balance = EXCLUDED.native_balance,
          token_balance = EXCLUDED.token_balance,
          last_checked = NOW()`,
-        [balance.blockchain, balance.native_balance, balance.token_balance]
+        [balance.blockchain, nativeBalance, tokenBalance]
       );
       
       // Log low balance warnings
       if (balance.is_low) {
         console.warn(`⚠️ LOW BALANCE ALERT: ${balance.blockchain.toUpperCase()}`);
-        console.warn(`   Native: ${balance.native_balance} (threshold: ${balance.native_threshold})`);
-        console.warn(`   Token: ${balance.token_balance} SPX (threshold: ${balance.token_threshold})`);
+        console.warn(`   Native: ${nativeBalance} (threshold: ${balance.native_threshold})`);
+        console.warn(`   Token: ${tokenBalance} SPX (threshold: ${balance.token_threshold})`);
         console.warn(`   Wallet: ${balance.wallet_address}`);
       }
     }
@@ -202,16 +205,30 @@ async function monitorBalances() {
   
   try {
     const evmBalances = await checkEVMBalances();
+    console.log('[BALANCE MONITOR] EVM balances:', JSON.stringify(evmBalances, null, 2));
+
     const solanaBalances = await checkSolanaBalances();
+    console.log('[BALANCE MONITOR] Solana balances:', JSON.stringify(solanaBalances, null, 2));
+    
     const allBalances = [...evmBalances, ...solanaBalances];
+    console.log('[BALANCE MONITOR] All balances to update:', allBalances.length);
     
     if (allBalances.length > 0) {
       await updateBalanceInDatabase(allBalances);
       
       // Log summary
       allBalances.forEach(balance => {
-        console.log(`[${balance.blockchain.toUpperCase()}] Native: ${balance.native_balance?.toFixed(4)} Token: ${balance.token_balance?.toFixed(2)} SPX Status: ${balance.is_low ? '⚠️ LOW' : '✅ OK'}`);
-      });
+        const native = typeof balance.native_balance === 'number' 
+          ? balance.native_balance 
+          : parseFloat(balance.native_balance || 0);
+        const token = typeof balance.token_balance === 'number'
+          ? balance.token_balance
+          : parseFloat(balance.token_balance || 0);
+        
+        console.log(`[${balance.blockchain?.toUpperCase() || 'UNKNOWN'}] ` +
+          `Native: ${native.toFixed(4)} ` +
+          `Token: ${token.toFixed(2)} SPX ` +
+          `Status: ${balance.is_low ? '⚠️ LOW' : '✅ OK'}`);      });
     } else {
       console.log('[BALANCE MONITOR] No balances to update');
     }
