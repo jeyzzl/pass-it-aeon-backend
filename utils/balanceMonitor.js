@@ -1,7 +1,8 @@
-const db = require('./db');
+const db = require('../db');
 const { ethers } = require('ethers');
-const { Connection, PublicKey } = require('@solana/web3.js');
+const { Connection, Keypair, PublicKey } = require('@solana/web3.js');
 const { getAccount, getAssociatedTokenAddress } = require('@solana/spl-token');
+const bs58 = require('bs58');
 
 const EVM_NETWORKS = {
   'ethereum': {
@@ -25,18 +26,23 @@ const FAUCET_PRIVATE_KEY_SOLANA = process.env.FAUCET_PRIVATE_KEY_SOLANA;
 
 async function checkEVMBalances() {
   const balances = [];
-
+  
   for (const [chain, config] of Object.entries(EVM_NETWORKS)) {
     try {
-      if (!config.rpc || !config.contract) continue;
-
+      if (!config.rpc || !config.contract) {
+        console.log(`[BALANCE MONITOR] Skipping ${chain}: missing RPC or contract`);
+        continue;
+      }
+      
       const provider = new ethers.JsonRpcProvider(config.rpc);
       const wallet = new ethers.Wallet(FAUCET_PRIVATE_KEY_EVM, provider);
-
+      
+      console.log(`[BALANCE MONITOR] Checking ${chain} balance for ${wallet.address}`);
+      
       // Check native balance
       const nativeBalance = await provider.getBalance(wallet.address);
       const nativeFormatted = ethers.formatEther(nativeBalance);
-    
+      
       // Check token balance
       const contract = new ethers.Contract(config.contract, [
         "function balanceOf(address) view returns (uint256)",
@@ -52,8 +58,8 @@ async function checkEVMBalances() {
         wallet_address: wallet.address,
         native_balance: parseFloat(nativeFormatted),
         token_balance: parseFloat(tokenFormatted),
-        native_threshold: 0.001, // Alert if below 0.01 ETH
-        token_threshold: 10, // Alert if below 10 SPX
+        native_threshold: 0.01,
+        token_threshold: 10,
         is_low: parseFloat(nativeFormatted) < 0.01 || parseFloat(tokenFormatted) < 10,
         explorer_url: `${config.explorer}/address/${wallet.address}`
       });
@@ -68,37 +74,71 @@ async function checkEVMBalances() {
 
 async function checkSolanaBalances() {
   try {
+    if (!SOLANA_RPC_URL || !SPX_TOKEN_MINT || !FAUCET_PRIVATE_KEY_SOLANA) {
+      console.error('[BALANCE MONITOR] Missing Solana environment variables');
+      return [];
+    }
+    
+    console.log('[BALANCE MONITOR] Connecting to Solana...');
     const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
-    const faucetPublicKey = new PublicKey(FAUCET_PRIVATE_KEY_SOLANA);
+    
+    // Try different key formats
+    let faucetKeypair;
+    try {
+      // Try as base58 string (most common)
+      const secretKey = bs58.decode(FAUCET_PRIVATE_KEY_SOLANA.trim());
+      faucetKeypair = Keypair.fromSecretKey(secretKey);
+      console.log('[BALANCE MONITOR] Parsed Solana key as base58');
+    } catch (base58Error) {
+      try {
+        // Try as JSON array
+        const secretKeyArray = JSON.parse(FAUCET_PRIVATE_KEY_SOLANA.trim());
+        faucetKeypair = Keypair.fromSecretKey(new Uint8Array(secretKeyArray));
+        console.log('[BALANCE MONITOR] Parsed Solana key as JSON array');
+      } catch (jsonError) {
+        console.error('[BALANCE MONITOR] Failed to parse Solana private key');
+        console.error('Base58 error:', base58Error.message);
+        console.error('JSON error:', jsonError.message);
+        return [];
+      }
+    }
+    
+    if (!faucetKeypair) {
+      console.error('[BALANCE MONITOR] Could not create Solana keypair');
+      return [];
+    }
+    
+    console.log(`[BALANCE MONITOR] Checking Solana wallet: ${faucetKeypair.publicKey.toBase58()}`);
     
     // Check SOL balance
-    const solBalance = await connection.getBalance(faucetPublicKey);
+    const solBalance = await connection.getBalance(faucetKeypair.publicKey);
     const solFormatted = solBalance / 1e9;
     
     // Check SPX token balance
-    const tokenAccount = await getAssociatedTokenAddress(
-      new PublicKey(SPX_TOKEN_MINT),
-      faucetPublicKey
-    );
-    
     let tokenBalance = 0;
     try {
+      const tokenAccount = await getAssociatedTokenAddress(
+        new PublicKey(SPX_TOKEN_MINT),
+        faucetKeypair.publicKey
+      );
+      
+      console.log(`[BALANCE MONITOR] Token account: ${tokenAccount.toBase58()}`);
       const accountInfo = await getAccount(connection, tokenAccount);
       tokenBalance = Number(accountInfo.amount) / 1e8; // Assuming 8 decimals for SPX
     } catch (error) {
+      console.warn(`[BALANCE MONITOR] Could not get token account: ${error.message}`);
       // Token account might not exist yet
-      tokenBalance = 0;
     }
     
     return [{
       blockchain: 'solana',
-      wallet_address: faucetPublicKey.toBase58(),
+      wallet_address: faucetKeypair.publicKey.toBase58(),
       native_balance: solFormatted,
       token_balance: tokenBalance,
-      native_threshold: 0.01, // Alert if below 0.1 SOL
-      token_threshold: 10, // Alert if below 10 SPX
+      native_threshold: 0.1,
+      token_threshold: 10,
       is_low: solFormatted < 0.1 || tokenBalance < 10,
-      explorer_url: `https://solscan.io/account/${faucetPublicKey.toBase58()}`
+      explorer_url: `https://solscan.io/account/${faucetKeypair.publicKey.toBase58()}`
     }];
     
   } catch (error) {
@@ -113,6 +153,21 @@ async function updateBalanceInDatabase(balances) {
     await client.query('BEGIN');
     
     for (const balance of balances) {
+      // Check if table exists and has unique constraint
+      const tableCheck = await client.query(`
+        SELECT EXISTS (
+          SELECT FROM information_schema.tables 
+          WHERE table_name = 'faucet_balances'
+        );
+      `);
+      
+      if (!tableCheck.rows[0].exists) {
+        console.log('[BALANCE MONITOR] faucet_balances table does not exist yet');
+        await client.query('ROLLBACK');
+        return;
+      }
+      
+      // Try to insert/update
       await client.query(
         `INSERT INTO faucet_balances 
          (blockchain, native_balance, token_balance, last_checked) 
@@ -130,8 +185,6 @@ async function updateBalanceInDatabase(balances) {
         console.warn(`   Native: ${balance.native_balance} (threshold: ${balance.native_threshold})`);
         console.warn(`   Token: ${balance.token_balance} SPX (threshold: ${balance.token_threshold})`);
         console.warn(`   Wallet: ${balance.wallet_address}`);
-        
-        // TODO: Add notification system (email, Discord, Telegram)
       }
     }
     
@@ -152,15 +205,16 @@ async function monitorBalances() {
     const solanaBalances = await checkSolanaBalances();
     const allBalances = [...evmBalances, ...solanaBalances];
     
-    await updateBalanceInDatabase(allBalances);
-    
-    // Log summary
-    allBalances.forEach(balance => {
-      console.log(`[${balance.blockchain.toUpperCase()}] 
-        Native: ${balance.native_balance.toFixed(4)} 
-        Token: ${balance.token_balance.toFixed(2)} SPX
-        Status: ${balance.is_low ? '⚠️ LOW' : '✅ OK'}`);
-    });
+    if (allBalances.length > 0) {
+      await updateBalanceInDatabase(allBalances);
+      
+      // Log summary
+      allBalances.forEach(balance => {
+        console.log(`[${balance.blockchain.toUpperCase()}] Native: ${balance.native_balance?.toFixed(4)} Token: ${balance.token_balance?.toFixed(2)} SPX Status: ${balance.is_low ? '⚠️ LOW' : '✅ OK'}`);
+      });
+    } else {
+      console.log('[BALANCE MONITOR] No balances to update');
+    }
     
   } catch (error) {
     console.error('[BALANCE MONITOR] Fatal error:', error.message);

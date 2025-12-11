@@ -63,21 +63,62 @@ const RETRY_DELAYS = [30000, 60000, 120000]; // 30s, 1min, 2min in milliseconds
 const BALANCE_CHECK_INTERVAL = 30 * 60 * 1000;
 let lastBalanceCheck = 0;
 
+// --- VALIDAR BLOCKCHAIN
+function validateAddressForBlockchain(address, blockchain) {
+  if (!address || !blockchain) return false;
+  
+  if (blockchain === 'solana') {
+    // Solana addresses are base58, 32-44 characters
+    return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address);
+  } else if (['ethereum', 'base', 'bnb'].includes(blockchain)) {
+    // EVM addresses: 0x followed by 40 hex characters
+    return /^0x[a-fA-F0-9]{40}$/.test(address);
+  }
+  return false;
+}
+
 // ============================================================
 // LÓGICA WORKER HEALTH
 // ============================================================
 async function updateWorkerHealth(status = 'healthy', errorMessage = null) {
   const client = await db.getClient();
   try {
-    await client.query(
-      `INSERT INTO worker_health (worker_type, last_heartbeat, status, error_message)
-       VALUES ('faucet_worker', NOW(), $1, $2)
-       ON CONFLICT (worker_type) DO UPDATE SET
-       last_heartbeat = NOW(),
-       status = EXCLUDED.status,
-       error_message = EXCLUDED.error_message`,
-      [status, errorMessage]
-    );
+    // First check if the table exists
+    const tableCheck = await client.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_name = 'worker_health'
+      );
+    `);
+    
+    if (!tableCheck.rows[0].exists) {
+      console.log('[HEALTH MONITOR] worker_health table does not exist yet');
+      client.release();
+      return;
+    }
+    
+    // Try to insert or update
+    try {
+      await client.query(
+        `INSERT INTO worker_health (worker_type, last_heartbeat, status, error_message)
+         VALUES ('faucet_worker', NOW(), $1, $2)
+         ON CONFLICT (worker_type) DO UPDATE SET
+         last_heartbeat = NOW(),
+         status = EXCLUDED.status,
+         error_message = EXCLUDED.error_message`,
+        [status, errorMessage]
+      );
+    } catch (conflictError) {
+      // If ON CONFLICT fails, try a simple update
+      console.log('[HEALTH MONITOR] Using fallback update method');
+      await client.query(
+        `UPDATE worker_health 
+         SET last_heartbeat = NOW(), status = $1, error_message = $2
+         WHERE worker_type = 'faucet_worker'`,
+        [status, errorMessage]
+      );
+    }
+    
   } catch (error) {
     console.error('[HEALTH MONITOR] Error updating health:', error.message);
   } finally {
@@ -309,6 +350,25 @@ async function checkDatabaseForJobs() {
     }
 
     const claim = rows[0];
+
+    if (!validateAddressForBlockchain(claim.wallet_address, claim.blockchain)) {
+      console.error(`[WORKER] Invalid address format for claim ${claim.id}: ${claim.wallet_address} for blockchain ${claim.blockchain}`);
+      
+      // Mark as failed with specific error
+      await client.query(
+        `UPDATE claims 
+         SET status = 'failed', 
+             error_log = $1, 
+             updated_at = NOW(),
+             retry_count = $2
+         WHERE id = $3`,
+        [`Invalid ${claim.blockchain} address format: ${claim.wallet_address}`, claim.retry_count + 1, claim.id]
+      );
+      
+      await client.query('COMMIT');
+      return;
+    }
+
     console.log(`[WORKER] Procesando claim ID: ${claim.id} para ${claim.blockchain} | Address: ${claim.wallet_address} | Retry: ${claim.retry_count}/${MAX_RETRIES}`);
 
     let result;

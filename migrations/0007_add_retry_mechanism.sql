@@ -26,3 +26,9 @@ CREATE TABLE faucet_balances (
     last_checked TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Add unique constraint to worker_health.worker_type
+ALTER TABLE worker_health ADD CONSTRAINT worker_health_worker_type_key UNIQUE (worker_type);
+
+-- Add unique constraint to faucet_balances.blockchain
+ALTER TABLE faucet_balances ADD CONSTRAINT faucet_balances_blockchain_key UNIQUE (blockchain);
