@@ -58,7 +58,7 @@ async function checkEVMBalances() {
         wallet_address: wallet.address,
         native_balance: parseFloat(nativeFormatted),
         token_balance: parseFloat(tokenFormatted),
-        native_threshold: 0.01,
+        native_threshold: 0.001,
         token_threshold: 10,
         is_low: parseFloat(nativeFormatted) < 0.01 || parseFloat(tokenFormatted) < 10,
         explorer_url: `${config.explorer}/address/${wallet.address}`
@@ -135,7 +135,7 @@ async function checkSolanaBalances() {
       wallet_address: faucetKeypair.publicKey.toBase58(),
       native_balance: solFormatted,
       token_balance: tokenBalance,
-      native_threshold: 0.1,
+      native_threshold: 0.05,
       token_threshold: 10,
       is_low: solFormatted < 0.1 || tokenBalance < 10,
       explorer_url: `https://solscan.io/account/${faucetKeypair.publicKey.toBase58()}`
